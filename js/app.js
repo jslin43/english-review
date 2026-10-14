@@ -10,6 +10,7 @@ const vocabularyKinds = ["words", "levels", "extra"];
 const simpleBank = kind => kind === "levels" || kind === "extra";
 const bankTitle = kind => kind === "extra" ? names.extra : kind === "levels" ? "依級別複習單字" : kind === "grammar" ? "文法原題練習" : `按頻率排序${names[kind]}`;
 const purposeLabel = purpose => ({ daily: "每日複習", wrong: "額外答錯複習", marked: "我的複習列表練習" })[purpose];
+const orderLabel = order => order === "random" ? "亂數出題" : "按序出題";
 const app = document.querySelector("#app");
 const notice = document.querySelector("#notice");
 let state;
@@ -134,13 +135,13 @@ function bankSetup(kind, purpose) {
   app.innerHTML = `<div class="study"><p class="eyebrow">${purposeLabel(purpose)}</p><h1>${purpose === "marked" ? `${names[kind]} · 我的複習列表` : purpose === "wrong" ? `複習答錯的${names[kind]}` : bankTitle(kind)}</h1>
     ${kind === "levels" && purpose !== "marked" ? `<div class="card"><label for="study-level">選擇複習級別</label><select id="study-level">${[1, 2, 3, 4, 5, 6].map(level => `<option value="${level}" ${String(level) === selectedLevel ? "selected" : ""}>第 ${level} 級</option>`).join("")}</select><p class="muted">依匯入詞表的級別。詞條只顯示中英文與發音，不顯示語料來源及出現次數。</p></div>` : ""}
     <p class="muted">${level !== "all" ? `第 ${selectedLevel} 級` : "此題庫（全部級別）"}符合目前設定 ${n.total} 筆 · 累計已答 ${n.seen} · 尚未練習 ${n.total - n.seen}</p>
-    ${old && !old.completed ? `<section class="card"><h2>有已儲存的進度</h2><p>${old.day} · ${purposeLabel(old.purpose)} · 已作答 ${old.attempts} 次</p><a class="button" href="#study-${kind}">繼續已儲存的練習</a>${old.day !== today() ? `<p class="warning">這是較早日期的練習。繼續後，新作答會計入今天；也可以結束舊進度，重新安排。</p>` : ""}</section>` : ""}
+    ${old && !old.completed ? `<section class="card"><h2>有已儲存的進度</h2><p>${old.day} · ${purposeLabel(old.purpose)}${kind === "extra" ? ` · ${orderLabel(old.order)}` : ""} · 已作答 ${old.attempts} 次</p><a class="button" href="#study-${kind}">繼續已儲存的練習</a>${old.day !== today() ? `<p class="warning">這是較早日期的練習。繼續後，新作答會計入今天；也可以結束舊進度，重新安排。</p>` : ""}</section>` : ""}
     <section class="card">
       <h2>${purpose === "marked" ? "只練習你標記為不熟的項目" : purpose === "wrong" ? "只選目前仍在答錯清單的項目" : "安排今天的練習"}</h2>
-      <p>${purpose === "marked" ? `已標記 ${state.reviewLists[kind].length} 筆，其中 ${markedCount} 筆符合目前排除設定；每輪最多 ${config.target} 筆，包含全部級別。可同日再練，不受一般複習的答對／答錯開關及每日剩餘配額限制，不加入未標記的項目。` : purpose === "wrong" ? `目前有 ${n.wrong} 筆答錯項目；每輪最多 ${config.target} 筆。此練習獨立於每日配額，不會偷偷加入新項目。` : `今日已答 ${n.today} 個不同項目，目標 ${config.target}，尚餘 ${remaining(kind)} 個。至少優先選 ${Math.min(config.reviewQuota, remaining(kind))} 個允許的舊項目（若足夠），其餘優先選${simpleBank(kind) ? "新項目（無頻率資料，按詞條排序）" : "高頻新項目"}。`}</p>
+      <p>${purpose === "marked" ? `已標記 ${state.reviewLists[kind].length} 筆，其中 ${markedCount} 筆符合目前排除設定；每輪最多 ${config.target} 筆，包含全部級別。可同日再練，不受一般複習的答對／答錯開關及每日剩餘配額限制，不加入未標記的項目。` : purpose === "wrong" ? `目前有 ${n.wrong} 筆答錯項目；每輪最多 ${config.target} 筆。此練習獨立於每日配額，不會偷偷加入新項目。` : `今日已答 ${n.today} 個不同項目，目標 ${config.target}，尚餘 ${remaining(kind)} 個。至少優先選 ${Math.min(config.reviewQuota, remaining(kind))} 個允許的舊項目（若足夠），其餘優先選${kind === "extra" ? "新項目，可依下方設定按序或亂數出題" : simpleBank(kind) ? "新項目（無頻率資料，按詞條排序）" : "高頻新項目"}。`}</p>
       <form id="start-form" class="stack">
         <div><label for="answer-mode">作答方式</label><select id="answer-mode"><option value="typing">看中文 → 輸入英文</option><option value="choice">看英文 → 四選一中文</option></select></div>
-        ${purpose !== "daily" ? `<div><label for="wrong-order">複習順序</label><select id="wrong-order"><option value="random">隨機</option><option value="frequency">${simpleBank(kind) ? "詞條順序" : "頻率由高到低"}</option></select></div>` : ""}
+        ${purpose !== "daily" || kind === "extra" ? `<div><label for="wrong-order">${kind === "extra" ? "出題順序" : "複習順序"}</label><select id="wrong-order"><option value="random" ${purpose !== "daily" ? "selected" : ""}>${kind === "extra" ? "亂數出題" : "隨機"}</option><option value="frequency" ${purpose === "daily" ? "selected" : ""}>${kind === "extra" ? "按序出題（英文詞條順序）" : simpleBank(kind) ? "詞條順序" : "頻率由高到低"}</option></select>${kind === "extra" ? '<p class="muted">順序適用於新開始的回合；繼續已儲存的練習不會重新洗牌。每日練習預設按序，亂數不會取消既有的舊題配額與排除設定。</p>' : ""}</div>` : ""}
         <p class="muted">${purpose === "daily" ? `納入答對舊項目：${config.includeCorrect ? "是" : "否"}；納入答錯舊項目：${config.includeWrong ? "是" : "否"}。` : ""}答錯後間隔 ${config.retryGap} 個其他已答項目再重試，每個項目每輪最多自動重試一次，避免無限循環；不足時保留在答錯清單。</p>
         <div class="actions"><button type="submit" ${!available ? "disabled" : ""}>${old && !old.completed ? "結束舊進度並開始這一輪" : "開始這一輪"}</button><a href="#settings">調整目標與複習比例</a>${purpose === "marked" ? '<a href="#reviews">返回我的複習列表</a>' : ""}</div>
       </form>
@@ -306,7 +307,7 @@ function study(kind) {
   const feedback = session.feedback;
   const total = session.newCount + session.reviewCount;
   const unique = session.answeredIds.length;
-  app.innerHTML = `<div class="study"><div class="actions"><a href="#home">← 儲存並返回首頁</a><span class="badge">${names[kind]} · ${purposeLabel(session.purpose)}</span></div><h1 class="section-heading">${!item || session.completed ? "這一輪已結束" : "專注眼前這一題"}</h1>
+  app.innerHTML = `<div class="study"><div class="actions"><a href="#home">← 儲存並返回首頁</a><span class="badge">${names[kind]} · ${purposeLabel(session.purpose)}${kind === "extra" ? ` · ${orderLabel(session.order)}` : ""}</span></div><h1 class="section-heading">${!item || session.completed ? "這一輪已結束" : "專注眼前這一題"}</h1>
     <p class="muted">${kind === "levels" && session.levelFilter !== "all" ? `第 ${session.levelFilter || selectedLevel} 級 · ` : ""}不同已答項目 ${unique} / ${total} · 作答次數 ${session.attempts}<br>本輪安排：新項目 ${session.newCount} · 舊項目 ${session.reviewCount}（不含重試）</p>
     <progress aria-label="本輪不同項目進度" value="${Math.min(unique, total)}" max="${Math.max(total, 1)}"></progress>
     ${session.day !== today() ? '<p class="warning">本輪開始於較早日期；現在的新作答計入今天，不會重複補發一整輪題目。</p>' : ""}
