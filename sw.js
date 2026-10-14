@@ -1,5 +1,5 @@
 const CACHE_PREFIX = `english-review:${self.registration.scope}:`;
-const CACHE_NAME = `${CACHE_PREFIX}v2`;
+const CACHE_NAME = `${CACHE_PREFIX}v3`;
 
 const ASSET_URLS = [
   "./",
@@ -11,7 +11,9 @@ const ASSET_URLS = [
   "./js/app.js",
   "./js/data.js",
   "./js/engine.js",
-  "./js/import-worker.js"
+  "./js/import-worker.js",
+  "./js/grammar.js",
+  "./js/speech.js"
 ].map(path => new URL(path, self.registration.scope).href);
 
 self.addEventListener("install", event => {

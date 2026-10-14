@@ -7,6 +7,43 @@ export function normalizeEnglish(text) {
   return String(text ?? "").replace(/[\u2018\u2019]/g, "'").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+const functionParts = new Set([
+  "pron", "pronoun", "prep", "preposition", "conj", "conjunction",
+  "art", "article", "det", "determiner", "aux", "auxiliary", "modal",
+  "代名詞", "代詞", "介系詞", "介詞", "連接詞", "連詞", "冠詞", "限定詞", "助動詞",
+]);
+const functionHeadwords = new Set([
+  "a", "an", "the", "and", "or", "but", "if", "because", "although", "unless",
+  "of", "in", "on", "at", "to", "from", "by", "with", "without", "for", "into",
+  "onto", "upon", "among", "between", "during",
+  "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
+  "my", "your", "our", "their", "its", "myself", "yourself", "himself", "herself",
+  "itself", "ourselves", "yourselves", "themselves",
+]);
+
+export function isFunctionWord(card) {
+  const details = card?.details;
+  if (typeof details?.function_word === "boolean") return details.function_word;
+  const rawPart = normalizeEnglish(details?.part_of_speech);
+  if (rawPart && !["-", "—", "unknown", "n/a"].includes(rawPart)) {
+    const parts = rawPart.replace(/\./g, " ")
+      .replace(/\b(?:auxiliary|aux|modal)\s+(?:verb|v)\b/g, "aux")
+      .replace(/\b(?:verb|v)\s+(?:auxiliary|aux|modal)\b/g, "aux")
+      .replace(/\b(?:definite|indefinite)\s+article\b/g, "article")
+      .split(/[\s,;；/|&+()[\]]+/).filter(Boolean);
+    // Content or unknown POS in a mixed entry wins over closed-class headword guesses.
+    return parts.length > 0 && parts.every(part => functionParts.has(part));
+  }
+  return functionHeadwords.has(normalizeEnglish(card?.english));
+}
+
+export function matchesLevel(card, levelFilter) {
+  if (levelFilter === "all") return true;
+  const level = [card.details?.ceec_level, card.details?.level, card.level]
+    .find(value => value != null && String(value).trim() !== "");
+  return String(level ?? "").split(/[;；]/).some(value => value.trim() === levelFilter);
+}
+
 function displayText(text) {
   return String(text ?? "").trim().replace(/\s+/g, " ");
 }
@@ -92,19 +129,27 @@ function reviewSort(cards, stats) {
 
 export function buildSession({
   kind, cards, stats = {}, settings = {}, purpose = "daily", order = "frequency",
-  mode = "typing", now = Date.now(), rng = Math.random,
+  mode = "typing", levelFilter = "all", now = Date.now(), rng = Math.random,
 }) {
   const day = localDay(now);
   const target = integerSetting(settings.target, 20, 1);
   const retryGap = integerSetting(settings.retryGap, 3, 1);
-  const capacity = purpose === "wrong" ? target : Math.max(0, target - todayCount(stats, now));
   const uniqueCards = [...new Map(cards.map(card => [card.id, card])).values()];
+  const vocabulary = kind === "words" || kind === "levels";
+  const selectedLevel = vocabulary && /^[1-6]$/.test(String(levelFilter)) ? String(levelFilter) : "all";
+  const excludeFunctionWords = vocabulary && settings.excludeFunctionWords !== false;
+  // Filters apply at session creation only; saved queues keep their original targets.
+  const targetCards = uniqueCards.filter(card => matchesLevel(card, selectedLevel) &&
+    (!excludeFunctionWords || !isFunctionWord(card)));
+  const practicedCount = vocabulary ?
+    targetCards.filter(card => practicedOn(stats[card.id], day)).length : todayCount(stats, now);
+  const capacity = purpose === "wrong" ? target : Math.max(0, target - practicedCount);
   const arrange = values => order === "random" ? shuffled(values, rng) : frequencySort(values);
   let selected;
   if (purpose === "wrong") {
-    selected = arrange(uniqueCards.filter(card => stats[card.id]?.status === "wrong")).slice(0, capacity);
+    selected = arrange(targetCards.filter(card => stats[card.id]?.status === "wrong")).slice(0, capacity);
   } else {
-    const eligible = uniqueCards.filter(card => !practicedOn(stats[card.id], day));
+    const eligible = targetCards.filter(card => !practicedOn(stats[card.id], day));
     const unseen = arrange(eligible.filter(card => !stats[card.id]));
     const reviews = reviewSort(eligible.filter(card => {
       const stat = stats[card.id];
@@ -125,6 +170,7 @@ export function buildSession({
   }));
   return {
     id, kind, day, purpose, mode: actualMode, order, queue, index: 0, feedback: null,
+    levelFilter: selectedLevel, excludeFunctionWords,
     attempts: 0, answeredIds: [], newCount: queue.filter(item => item.origin === "new").length,
     reviewCount: queue.filter(item => item.origin === "review").length,
     pendingRetries: [], retryGap, nextToken: queue.length, completed: queue.length === 0,
@@ -133,6 +179,19 @@ export function buildSession({
 
 export function currentItem(session) {
   return !session || session.completed ? null : session.queue[session.index] ?? null;
+}
+
+export function recordAttempt(previous, correct, now = Date.now()) {
+  previous = previous ?? {};
+  const streak = correct ? (previous.streak || 0) + 1 : 0;
+  const status = !correct || (previous.status === "wrong" && streak < 3) ? "wrong" : "correct";
+  const days = [...new Set([...(previous.days ?? []), localDay(now)])];
+  return {
+    ...previous, attempts: (previous.attempts || 0) + 1,
+    correct: (previous.correct || 0) + Number(correct),
+    wrong: (previous.wrong || 0) + Number(!correct), status, streak,
+    lastPracticed: new Date(now).getTime(), days,
+  };
 }
 
 export function gradeSession(session, stats, { token, answer, cards, now = Date.now(), rng = Math.random }) {
@@ -146,19 +205,10 @@ export function gradeSession(session, stats, { token, answer, cards, now = Date.
   const supplied = choice ? displayText(answer) : normalizeEnglish(answer);
   if (choice && (!item.choices || item.choices.length !== 4 || !item.choices.includes(supplied))) return unchanged;
   const correct = supplied === (choice ? expected : normalizeEnglish(expected));
-  const previous = stats[item.id] ?? {};
-  const streak = correct ? (previous.streak || 0) + 1 : 0;
-  const status = !correct || (previous.status === "wrong" && streak < 3) ? "wrong" : "correct";
   const day = localDay(now);
-  const days = [...new Set([...(previous.days ?? []), day])];
   const nextStats = {
     ...stats,
-    [item.id]: {
-      ...previous, attempts: (previous.attempts || 0) + 1,
-      correct: (previous.correct || 0) + Number(correct),
-      wrong: (previous.wrong || 0) + Number(!correct), status, streak,
-      lastPracticed: new Date(now).getTime(), days,
-    },
+    [item.id]: recordAttempt(stats[item.id], correct, now),
   };
   const attempts = session.attempts + 1;
   let pendingRetries = session.pendingRetries.filter(retry => retry.id !== item.id);

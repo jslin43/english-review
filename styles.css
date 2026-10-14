@@ -10,14 +10,15 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 a { color: var(--blue); text-underline-offset: 4px; }
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button, .button { min-height: 46px; padding: 10px 18px; border: 1px solid transparent; border-radius: 10px; background: var(--blue); color: white; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-weight: 600; }
 button:hover, .button:hover { background: #173da8; }
 button.secondary, .button.secondary { color: #213b62; background: #edf2fa; border-color: var(--border); }
 button.danger { background: #a32030; }
 button:disabled { opacity: .55; cursor: not-allowed; }
 :focus-visible { outline: 3px solid #b05b00; outline-offset: 3px; }
-input:not([type=checkbox]), select { border: 1px solid #899ab0; border-radius: 8px; padding: 10px; min-height: 46px; background: white; color: #182b43; width: 100%; max-width: 100%; }
+input:not([type=checkbox]):not([type=radio]), select, textarea { border: 1px solid #899ab0; border-radius: 8px; padding: 10px; min-height: 46px; background: white; color: #182b43; width: 100%; max-width: 100%; }
+input[type=radio] { width: 21px; height: 21px; flex-shrink: 0; accent-color: var(--blue); }
 input[type=checkbox] { width: 21px; height: 21px; accent-color: var(--blue); flex-shrink: 0; }
 input[type=file] { font-size: .9rem; }
 label { display: block; font-weight: 600; margin-bottom: 6px; }
@@ -60,6 +61,9 @@ progress { width: 100%; height: 12px; accent-color: var(--blue); }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .study { max-width: 780px; margin: 0 auto; }
 .prompt { font-size: clamp(1.65rem, 5vw, 2.7rem); line-height: 1.45; margin: 24px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.grammar-prompt { font-size: clamp(1.25rem, 4vw, 1.8rem); }
+.cloze-gap { background: #fff0b0; color: #503500; border-radius: 6px; padding: 2px 8px; }
+.grammar-option { padding: 12px; border: 1px solid var(--border); border-radius: 8px; margin: 10px 0; overflow-wrap: anywhere; }
 .choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .choice-grid button { justify-content: flex-start; text-align: left; min-height: 64px; color: #203854; background: white; border-color: #92a6c1; white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 500; }
 .choice-grid button:hover { background: #eaf1ff; border-color: var(--blue); }
