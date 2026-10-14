@@ -1,7 +1,7 @@
 import { labelFor, normalizeEnglish } from "./engine.js";
 import { buildGrammarQuestions } from "./grammar.js";
 
-export const BANKS = Object.freeze(["words", "phrases", "grammar", "levels"]);
+export const BANKS = Object.freeze(["words", "phrases", "grammar", "levels", "extra"]);
 const DB_NAME = "english-review";
 const STORE = "state";
 let databasePromise;
@@ -12,6 +12,7 @@ const object = value => value !== null && typeof value === "object" &&
 const safeNumber = value => Number.isSafeInteger(value) && value >= 0;
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const bankCheck = kind => BANKS.includes(kind) || fail("未知的題庫類型。");
+const levelBank = kind => kind === "levels" || kind === "extra";
 
 // Only slices of retained fields are collected; ignored columns are syntax-checked
 // without ever constructing their (potentially multi-megabyte) JSON strings.
@@ -90,7 +91,7 @@ function idCheck(id, kind) {
   if (typeof id !== "string" || !id.trim() || id !== id.trim() || ["__proto__", "constructor", "prototype"].includes(id)) fail("題目 ID 無效。");
   if (kind === "words" && !/^word:.+/.test(id)) fail("單字題庫 ID 必須以 word: 開頭。");
   if (kind === "phrases" && !/^phrase:.+/.test(id)) fail("片語題庫 ID 必須以 phrase: 開頭。");
-  if (kind === "levels" && !/^level-word:.+/.test(id)) fail("分級單字 ID 必須以 level-word: 開頭。");
+  if (levelBank(kind) && !/^level-word:.+/.test(id)) fail("分級單字 ID 必須以 level-word: 開頭。");
   if (kind === "grammar" && !/^[a-z][a-z0-9_]*$/.test(id)) fail("文法題庫 ID 必須是文法分類名稱。");
 }
 
@@ -113,7 +114,7 @@ function csvImporter(kind) {
     if (!headers) {
       headers = row.map(value => value.trim());
       if (headers.some(value => !value) || new Set(headers).size !== headers.length) fail("CSV 欄位名稱不可空白或重複。");
-      for (const name of ["id", "english", "chinese", kind === "levels" ? "level" : "total_occurrences"]) {
+      for (const name of ["id", "english", "chinese", levelBank(kind) ? "level" : "total_occurrences"]) {
         if (!headers.includes(name)) fail(`CSV 缺少必要欄位：${name}。`);
       }
       return;
@@ -126,7 +127,7 @@ function csvImporter(kind) {
     ids.add(id);
     const english = source.english.trim(), chinese = source.chinese.trim();
     if (!english || !chinese) fail(`CSV 第 ${number} 列的英文與中文不可空白。`);
-    const frequency = kind === "levels" && !source.total_occurrences?.trim() ? 0 :
+    const frequency = levelBank(kind) && !source.total_occurrences?.trim() ? 0 :
       numericCell(source.total_occurrences.trim(), "total_occurrences");
     for (const name of ["gsat_occurrences", "listening_occurrences", "document_count", "high_confidence_questions", "medium_confidence_questions"]) {
       if (source[name]?.trim()) numericCell(source[name].trim(), name);
@@ -143,15 +144,15 @@ function csvImporter(kind) {
       } catch { fail(`CSV 第 ${number} 列的 ${name} JSON 格式無效，必須是陣列。`); }
     }
     let level = null;
-    const levelText = kind === "levels" ? source.level.trim() : source.ceec_level?.trim();
-    if (kind === "levels" && !levelText) fail(`CSV 第 ${number} 列的 level 不可空白。`);
+    const levelText = levelBank(kind) ? source.level.trim() : source.ceec_level?.trim();
+    if (levelBank(kind) && !levelText) fail(`CSV 第 ${number} 列的 level 不可空白。`);
     if (levelText) {
       const values = levelText.split(";").map(value => value.trim());
       if (values.some(value => !/^[1-6]$/.test(value))) fail(`CSV 第 ${number} 列的 CEEC 級別必須介於 1 至 6。`);
       const normalized = [...new Set(values)].sort();
       level = Number(normalized[0]);
       source.ceec_level = normalized.join(";");
-      if (kind === "levels") source.level = source.ceec_level;
+      if (levelBank(kind)) source.level = source.ceec_level;
     }
     const details = Object.fromEntries(Object.entries(source).filter(([key, value]) =>
       !["id", "english", "chinese", "total_occurrences"].includes(key) && value !== ""));
@@ -234,16 +235,17 @@ export async function ingestCSVFile(file, kind) {
 
 export function initialState() {
   return {
-    version: 2,
+    version: 3,
     revision: 0,
-    banks: { words: [], phrases: [], grammar: [], levels: [] },
+    banks: Object.fromEntries(BANKS.map(kind => [kind, []])),
     settings: Object.fromEntries(BANKS.map((kind, i) => [kind, {
-      target: [20, 10, 5, 20][i], reviewQuota: [5, 3, 2, 5][i],
+      target: [20, 10, 5, 20, 20][i], reviewQuota: [5, 3, 2, 5, 5][i],
       includeCorrect: true, includeWrong: true, retryGap: 3,
-      excludeFunctionWords: kind === "words" || kind === "levels"
+      excludeFunctionWords: kind === "words" || levelBank(kind)
     }])),
-    stats: { words: {}, phrases: {}, grammar: {}, levels: {} },
-    sessions: { words: null, phrases: null, grammar: null, levels: null },
+    stats: Object.fromEntries(BANKS.map(kind => [kind, {}])),
+    sessions: Object.fromEntries(BANKS.map(kind => [kind, null])),
+    reviewLists: Object.fromEntries(BANKS.map(kind => [kind, []])),
     grammarWork: { currentQuestionId: null, category: "all", filter: "all", answers: {} },
     grammarKeys: []
   };
@@ -254,7 +256,7 @@ export function openDB() {
   if (databasePromise) return databasePromise;
   databasePromise = new Promise((resolve, reject) => {
     let blocked = false;
-    const request = indexedDB.open(DB_NAME, 2);
+    const request = indexedDB.open(DB_NAME, 3);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(STORE)) {
         const store = request.result.createObjectStore(STORE);
@@ -285,7 +287,7 @@ export async function readState() {
     request.onsuccess = () => {
       try {
         result = request.result;
-        if (result?.version === 1 || result?.version === 2 && needsGrammarDefaults(result)) {
+        if (result?.version === 1 || result?.version === 2 || result?.version === 3 && needsGrammarDefaults(result)) {
           result = validateBackup(result);
           if (result.revision === Number.MAX_SAFE_INTEGER) fail("資料版本超出安全範圍。");
           result.revision++;
@@ -310,7 +312,7 @@ export async function mutateState(expectedRevision, transform, migrateCurrent = 
       try {
         let current = request.result;
         if (!current || current.revision !== expectedRevision) fail("其他分頁已更新資料。請重新載入最新資料後再試，這次變更尚未儲存。");
-        if (migrateCurrent && current.version === 1) current = validateBackup(current);
+        if (migrateCurrent && [1, 2].includes(current.version)) current = validateBackup(current);
         if (current.revision === Number.MAX_SAFE_INTEGER) fail("資料版本超出安全範圍。");
         result = transform(current) ?? current;
         if (!object(result) || typeof result.then === "function") fail("資料修改必須同步完成並回傳資料物件。");
@@ -365,6 +367,7 @@ export async function replaceBank(kind, cards, expectedRevision) {
     state.banks[kind] = imported;
     state.stats[kind] = Object.fromEntries(Object.entries(state.stats[kind]).filter(([id]) => ids.has(id)));
     state.sessions[kind] = null;
+    state.reviewLists[kind] = state.reviewLists[kind].filter(id => (questionIds ?? ids).has(id));
     if (kind === "grammar") {
       const previous = state.grammarWork ?? initialState().grammarWork;
       state.grammarWork = {
@@ -376,6 +379,20 @@ export async function replaceBank(kind, cards, expectedRevision) {
     }
     return state;
   });
+}
+
+// Synchronous transaction mutator: changes only reviewLists and returns the same state.
+export function setReviewMark(state, kind, id, marked) {
+  bankCheck(kind);
+  if (typeof marked !== "boolean") fail("複習標記必須是布林值。");
+  const ids = new Set((kind === "grammar" ? buildGrammarQuestions(state.banks[kind]) : state.banks[kind])
+    .map(item => item.id));
+  if (!ids.has(id)) fail("複習標記參照不存在的題目。");
+  const marks = state.reviewLists[kind];
+  if (marked) {
+    if (!marks.includes(id)) state.reviewLists[kind] = [...marks, id];
+  } else state.reviewLists[kind] = marks.filter(value => value !== id);
+  return state;
 }
 
 function validDay(day) {
@@ -408,7 +425,7 @@ function validateSession(session, kind, ids, stats, cards) {
   if (session === null) return;
   if (!object(session) || typeof session.id !== "string" || !session.id ||
       session.kind !== kind || !validDay(session.day) ||
-      !["daily", "wrong"].includes(session.purpose) || !["typing", "choice"].includes(session.mode) ||
+      !["daily", "wrong", "marked"].includes(session.purpose) || !["typing", "choice"].includes(session.mode) ||
       kind === "grammar" && session.mode !== "choice" || !["frequency", "random"].includes(session.order) ||
       !["index", "attempts", "newCount", "reviewCount", "retryGap", "nextToken"].every(key => safeNumber(session[key])) ||
       session.retryGap < 1 || typeof session.completed !== "boolean" ||
@@ -484,7 +501,7 @@ function validateGrammarWork(work, cards) {
   if (!allowedFields(work, ["currentQuestionId", "category", "answers"], ["filter"]) ||
       work.currentQuestionId !== null && !questionId(work.currentQuestionId) ||
       typeof work.category !== "string" || work.category !== "all" && !cards.some(card => card.id === work.category) ||
-      own(work, "filter") && !["all", "wrong", "unanswered"].includes(work.filter) ||
+      own(work, "filter") && !["all", "wrong", "unanswered", "marked"].includes(work.filter) ||
       !object(work.answers)) fail("備份的文法原題練習格式或分類無效。");
   let questions;
   try { questions = new Set(buildGrammarQuestions(cards).map(question => question.id)); }
@@ -522,9 +539,9 @@ function validateGrammarKeys(keys) {
 }
 
 export function validateBackup(data) {
-  if (!object(data) || ![1, 2].includes(data.version) || !safeNumber(data.revision)) fail("備份版本或資料格式不支援。");
+  if (!object(data) || ![1, 2, 3].includes(data.version) || !safeNumber(data.revision)) fail("備份版本或資料格式不支援。");
   jsonValue(data);
-  const banks = data.version === 1 ? BANKS.slice(0, 3) : BANKS;
+  const banks = BANKS.slice(0, data.version === 1 ? 3 : data.version === 2 ? 4 : BANKS.length);
   for (const name of ["banks", "settings", "stats", "sessions"]) {
     if (!object(data[name]) || Object.keys(data[name]).length !== banks.length ||
         banks.some(kind => !own(data[name], kind))) fail(`備份缺少完整的 ${name} 題庫資料。`);
@@ -544,19 +561,31 @@ export function validateBackup(data) {
     validateSession(data.sessions[kind], kind, ids, data.stats[kind], data.banks[kind]);
   }
   validateGrammarWork(own(data, "grammarWork") ? data.grammarWork : initialState().grammarWork, data.banks.grammar);
+  if (data.version === 3 || own(data, "reviewLists")) {
+    if (!object(data.reviewLists) || Object.keys(data.reviewLists).length !== banks.length ||
+        banks.some(kind => !own(data.reviewLists, kind))) fail("備份缺少完整的複習標記題庫資料。");
+    for (const kind of banks) {
+      const marks = data.reviewLists[kind];
+      const ids = new Set((kind === "grammar" ? buildGrammarQuestions(data.banks[kind]) : data.banks[kind])
+        .map(item => item.id));
+      if (!Array.isArray(marks) || new Set(marks).size !== marks.length ||
+          marks.some(id => typeof id !== "string" || !ids.has(id))) fail("備份的複習標記格式、重複 ID 或題目參照無效。");
+    }
+  }
   if (own(data, "grammarKeys")) validateGrammarKeys(data.grammarKeys);
   if (own(data, "importInfo") && !object(data.importInfo)) fail("備份的匯入資訊格式錯誤。");
   const result = structuredClone(data);
-  if (result.version === 1) {
+  if (result.version < 3) {
     const defaults = initialState();
-    for (const name of ["banks", "settings", "stats", "sessions"]) result[name].levels = defaults[name].levels;
+    for (const name of ["banks", "settings", "stats", "sessions"]) {
+      for (const kind of BANKS.slice(banks.length)) result[name][kind] = defaults[name][kind];
+    }
     for (const kind of BANKS) {
       result.settings[kind].excludeFunctionWords ??= defaults.settings[kind].excludeFunctionWords;
     }
-    // These remain concept statistics, never original-question practice statistics.
-    result.sessions.grammar = null;
-    result.grammarWork ??= defaults.grammarWork;
-    result.version = 2;
+    result.reviewLists ??= defaults.reviewLists;
+    for (const kind of BANKS) result.reviewLists[kind] ??= [];
+    result.version = 3;
   }
   result.grammarKeys ??= [];
   result.grammarWork ??= initialState().grammarWork;

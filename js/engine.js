@@ -129,13 +129,13 @@ function reviewSort(cards, stats) {
 
 export function buildSession({
   kind, cards, stats = {}, settings = {}, purpose = "daily", order = "frequency",
-  mode = "typing", levelFilter = "all", now = Date.now(), rng = Math.random,
+  mode = "typing", levelFilter = "all", reviewIds = [], now = Date.now(), rng = Math.random,
 }) {
   const day = localDay(now);
   const target = integerSetting(settings.target, 20, 1);
   const retryGap = integerSetting(settings.retryGap, 3, 1);
   const uniqueCards = [...new Map(cards.map(card => [card.id, card])).values()];
-  const vocabulary = kind === "words" || kind === "levels";
+  const vocabulary = kind === "words" || kind === "levels" || kind === "extra";
   const selectedLevel = vocabulary && /^[1-6]$/.test(String(levelFilter)) ? String(levelFilter) : "all";
   const excludeFunctionWords = vocabulary && settings.excludeFunctionWords !== false;
   // Filters apply at session creation only; saved queues keep their original targets.
@@ -143,10 +143,13 @@ export function buildSession({
     (!excludeFunctionWords || !isFunctionWord(card)));
   const practicedCount = vocabulary ?
     targetCards.filter(card => practicedOn(stats[card.id], day)).length : todayCount(stats, now);
-  const capacity = purpose === "wrong" ? target : Math.max(0, target - practicedCount);
+  const capacity = purpose === "wrong" || purpose === "marked" ? target : Math.max(0, target - practicedCount);
   const arrange = values => order === "random" ? shuffled(values, rng) : frequencySort(values);
   let selected;
-  if (purpose === "wrong") {
+  if (purpose === "marked") {
+    const markedIds = new Set(reviewIds);
+    selected = arrange(targetCards.filter(card => markedIds.has(card.id))).slice(0, capacity);
+  } else if (purpose === "wrong") {
     selected = arrange(targetCards.filter(card => stats[card.id]?.status === "wrong")).slice(0, capacity);
   } else {
     const eligible = targetCards.filter(card => !practicedOn(stats[card.id], day));

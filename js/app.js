@@ -1,18 +1,24 @@
-import { readState, mutateState, replaceBank, restoreBackup, exportBackup, exportListCSV, ingestGrammarKeys } from "./data.js";
+import { readState, mutateState, replaceBank, restoreBackup, exportBackup, exportListCSV, ingestGrammarKeys, setReviewMark } from "./data.js";
 import { localDay, frequencySort, labelFor, buildSession, currentItem, gradeSession, advanceSession, isFunctionWord, matchesLevel } from "./engine.js";
 import { buildGrammarQuestions, clozePrompt, matchGrammarAnswer, recordGrammarResponse } from "./grammar.js";
 import { speakEnglish, stopSpeaking } from "./speech.js";
 
-const names = { words: "單字", phrases: "片語", grammar: "文法", levels: "分級單字" };
+const names = { words: "單字", phrases: "片語", grammar: "文法", levels: "分級單字", extra: "未出現過的單字" };
 const kinds = Object.keys(names);
-const studyKinds = ["words", "phrases", "levels"];
-const bankTitle = kind => kind === "levels" ? "依級別複習單字" : kind === "grammar" ? "文法原題練習" : `按頻率排序${names[kind]}`;
+const studyKinds = ["words", "phrases", "levels", "extra"];
+const vocabularyKinds = ["words", "levels", "extra"];
+const simpleBank = kind => kind === "levels" || kind === "extra";
+const bankTitle = kind => kind === "extra" ? names.extra : kind === "levels" ? "依級別複習單字" : kind === "grammar" ? "文法原題練習" : `按頻率排序${names[kind]}`;
+const purposeLabel = purpose => ({ daily: "每日複習", wrong: "額外答錯複習", marked: "我的複習列表練習" })[purpose];
 const app = document.querySelector("#app");
 const notice = document.querySelector("#notice");
 let state;
 let busy = false;
 let listPage = 0;
 let selectedLevel = "1";
+let reviewKind = "words";
+let reviewPage = 0;
+let reviewQuery = "";
 let listFilters = { kind: "words", status: "all", level: "all", sort: "frequency", query: "", eligible: true };
 const channel = "BroadcastChannel" in window ? new BroadcastChannel("english-review-state") : null;
 
@@ -26,11 +32,12 @@ const activeSession = kind => state.sessions[kind] && !state.sessions[kind].comp
 const levelLabel = card => [card.details?.ceec_level, card.details?.level, card.level]
   .find(value => value != null && String(value).trim() !== "") ?? "未標註";
 const speechButton = card => `<button class="secondary small" type="button" data-speak="${escape(card.english)}" aria-label="朗讀 ${escape(card.english)}">▶ 發音</button>`;
+const reviewMark = (kind, id) => `<label class="check review-mark"><input type="checkbox" data-review-kind="${kind}" data-review-id="${escape(id)}" ${state.reviewLists[kind].includes(id) ? "checked" : ""}>不太熟，加入複習列表</label>`;
 
 function poolFor(kind, level = kind === "levels" ? selectedLevel : "all") {
   return state.banks[kind].filter(card =>
     matchesLevel(card, level) &&
-    (!["words", "levels"].includes(kind) || !state.settings[kind].excludeFunctionWords || !isFunctionWord(card)));
+    (!vocabularyKinds.includes(kind) || !state.settings[kind].excludeFunctionWords || !isFunctionWord(card)));
 }
 
 function announce(message, error = false) {
@@ -100,14 +107,16 @@ function home() {
         return `<section class="card"><span class="badge">${n.total} 個分類 · ${questions.length} 道原題</span><h2 class="section-heading">文法原題練習</h2><p>依分類選擇真正的填空題／原始選項，不再考文法名稱翻譯。</p><p class="muted">已保存 ${Object.values(state.grammarWork.answers).filter(answer => answer.submitted).length} 道作答 · ${verified} 道已對應答案，可自動判分</p><a class="button" href="#grammar">開始／繼續原題</a></section>`;
       }
       return `<section class="card"><span class="badge">${imported ? `${imported.toLocaleString()} 筆已匯入` : "等待匯入"}</span><h2 class="section-heading">${bankTitle(kind)}</h2>
+        ${kind === "extra" ? '<p class="muted">分級表有、原 vocabulary.csv 未收錄的單字；不代表所有考試都沒出現過，也不是「尚未練習」的意思。</p>' : ""}
         ${imported ? `<div class="stats"><div><strong>${n.today}${kind === "levels" ? "" : ` / ${target}`}</strong><span>今日不同已答項目${kind === "levels" ? "（各級合計）" : ""}</span></div><div><strong>${n.total - n.seen}</strong><span>可練習的未見項目</span></div></div>
           ${kind === "levels" ? "<p>選擇第 1 至第 6 級，每級分開安排每日目標。</p>" : `<progress aria-label="${names[kind]}今日進度" value="${Math.min(n.today, target)}" max="${target}"></progress>`}
           <p class="muted">累計已答 ${n.seen} · 答對清單 ${n.correct} · 答錯清單 ${n.wrong}</p>
-          ${["words", "levels"].includes(kind) && state.settings[kind].excludeFunctionWords ? `<p class="muted">已排除 ${state.banks[kind].filter(isFunctionWord).length} 個虛詞作為測試目標，資料仍保留。</p>` : ""}
+          ${vocabularyKinds.includes(kind) && state.settings[kind].excludeFunctionWords ? `<p class="muted">已排除 ${state.banks[kind].filter(isFunctionWord).length} 個虛詞作為測試目標，資料仍保留。</p>` : ""}
           <div class="actions"><a class="button" href="#bank-${kind}">${activeSession(kind) ? "繼續／安排複習" : "安排今日複習"}</a></div>`
         : `<p class="muted">你的題庫尚未準備。匯入後，進度會自動保存在此裝置。</p><a class="button" href="#settings">匯入${names[kind]} CSV</a>`}
       </section>`;
     }).join("")}</div>
+    <section class="card"><h2>我的複習列表</h2><p>已標記 ${kinds.reduce((sum, kind) => sum + state.reviewLists[kind].length, 0)} 個不熟項目。標記與答對／答錯分開保存，取消勾選才移出。</p><a class="button" href="#reviews">查看／練習我的複習列表</a></section>
     <h2 class="section-heading">把不熟的，慢慢變熟</h2><div class="grid">${studyKinds.map(kind => `<a class="card" href="#wrong-${kind}"><h3>複習答錯的${names[kind]}</h3><p class="muted">${bankNumbers(kind, poolFor(kind, "all")).wrong} 筆符合設定待加強 · 連續答對 3 次才移出</p></a>`).join("")}</div>
     <div class="hint">答錯也算一次練習，但不會直接變成熟悉。每日目標計算「不同項目」，重試不重複計數。<br>頻率僅代表匯入語料中的出現次數，並非所有歷年試題的完整統計。</div>`;
 }
@@ -116,22 +125,27 @@ function bankSetup(kind, purpose) {
   if (kind === "grammar") { grammarView(); return; }
   if (!state.banks[kind].length) { app.innerHTML = emptyBank(kind); return; }
   const config = state.settings[kind];
-  const n = bankNumbers(kind, poolFor(kind));
+  const level = kind === "levels" && purpose !== "marked" ? selectedLevel : "all";
+  const cards = poolFor(kind, level);
+  const n = bankNumbers(kind, cards);
+  const markedCount = cards.filter(card => state.reviewLists[kind].includes(card.id)).length;
+  const available = purpose === "marked" ? markedCount : purpose === "wrong" ? n.wrong : remaining(kind);
   const old = state.sessions[kind];
-  app.innerHTML = `<div class="study"><p class="eyebrow">${purpose === "wrong" ? "額外弱項練習" : "每日複習"}</p><h1>${purpose === "wrong" ? `複習答錯的${names[kind]}` : bankTitle(kind)}</h1>
-    ${kind === "levels" ? `<div class="card"><label for="study-level">選擇複習級別</label><select id="study-level">${[1, 2, 3, 4, 5, 6].map(level => `<option value="${level}" ${String(level) === selectedLevel ? "selected" : ""}>第 ${level} 級</option>`).join("")}</select><p class="muted">依匯入詞表的級別。詞條只顯示中英文與發音，不顯示語料來源及出現次數。</p></div>` : ""}
-    <p class="muted">${kind === "levels" ? `第 ${selectedLevel} 級` : "此題庫"}符合目前設定 ${n.total} 筆 · 累計已答 ${n.seen} · 尚未練習 ${n.total - n.seen}</p>
-    ${old && !old.completed ? `<section class="card"><h2>有已儲存的進度</h2><p>${old.day} · ${old.purpose === "wrong" ? "答錯複習" : "每日複習"} · 已作答 ${old.attempts} 次</p><a class="button" href="#study-${kind}">繼續已儲存的練習</a>${old.day !== today() ? `<p class="warning">這是較早日期的練習。繼續後，新作答會計入今天；也可以結束舊進度，重新安排。</p>` : ""}</section>` : ""}
+  app.innerHTML = `<div class="study"><p class="eyebrow">${purposeLabel(purpose)}</p><h1>${purpose === "marked" ? `${names[kind]} · 我的複習列表` : purpose === "wrong" ? `複習答錯的${names[kind]}` : bankTitle(kind)}</h1>
+    ${kind === "levels" && purpose !== "marked" ? `<div class="card"><label for="study-level">選擇複習級別</label><select id="study-level">${[1, 2, 3, 4, 5, 6].map(level => `<option value="${level}" ${String(level) === selectedLevel ? "selected" : ""}>第 ${level} 級</option>`).join("")}</select><p class="muted">依匯入詞表的級別。詞條只顯示中英文與發音，不顯示語料來源及出現次數。</p></div>` : ""}
+    <p class="muted">${level !== "all" ? `第 ${selectedLevel} 級` : "此題庫（全部級別）"}符合目前設定 ${n.total} 筆 · 累計已答 ${n.seen} · 尚未練習 ${n.total - n.seen}</p>
+    ${old && !old.completed ? `<section class="card"><h2>有已儲存的進度</h2><p>${old.day} · ${purposeLabel(old.purpose)} · 已作答 ${old.attempts} 次</p><a class="button" href="#study-${kind}">繼續已儲存的練習</a>${old.day !== today() ? `<p class="warning">這是較早日期的練習。繼續後，新作答會計入今天；也可以結束舊進度，重新安排。</p>` : ""}</section>` : ""}
     <section class="card">
-      <h2>${purpose === "wrong" ? "只選目前仍在答錯清單的項目" : "安排今天的練習"}</h2>
-      <p>${purpose === "wrong" ? `目前有 ${n.wrong} 筆答錯項目；每輪最多 ${config.target} 筆。此練習獨立於每日配額，不會偷偷加入新項目。` : `今日已答 ${n.today} 個不同項目，目標 ${config.target}，尚餘 ${remaining(kind)} 個。至少優先選 ${Math.min(config.reviewQuota, remaining(kind))} 個允許的舊項目（若足夠），其餘優先選高頻新項目。`}</p>
+      <h2>${purpose === "marked" ? "只練習你標記為不熟的項目" : purpose === "wrong" ? "只選目前仍在答錯清單的項目" : "安排今天的練習"}</h2>
+      <p>${purpose === "marked" ? `已標記 ${state.reviewLists[kind].length} 筆，其中 ${markedCount} 筆符合目前排除設定；每輪最多 ${config.target} 筆，包含全部級別。可同日再練，不受一般複習的答對／答錯開關及每日剩餘配額限制，不加入未標記的項目。` : purpose === "wrong" ? `目前有 ${n.wrong} 筆答錯項目；每輪最多 ${config.target} 筆。此練習獨立於每日配額，不會偷偷加入新項目。` : `今日已答 ${n.today} 個不同項目，目標 ${config.target}，尚餘 ${remaining(kind)} 個。至少優先選 ${Math.min(config.reviewQuota, remaining(kind))} 個允許的舊項目（若足夠），其餘優先選${simpleBank(kind) ? "新項目（無頻率資料，按詞條排序）" : "高頻新項目"}。`}</p>
       <form id="start-form" class="stack">
         <div><label for="answer-mode">作答方式</label><select id="answer-mode"><option value="typing">看中文 → 輸入英文</option><option value="choice">看英文 → 四選一中文</option></select></div>
-        ${purpose === "wrong" ? '<div><label for="wrong-order">答錯複習順序</label><select id="wrong-order"><option value="random">隨機</option><option value="frequency">頻率由高到低</option></select></div>' : ""}
+        ${purpose !== "daily" ? `<div><label for="wrong-order">複習順序</label><select id="wrong-order"><option value="random">隨機</option><option value="frequency">${simpleBank(kind) ? "詞條順序" : "頻率由高到低"}</option></select></div>` : ""}
         <p class="muted">${purpose === "daily" ? `納入答對舊項目：${config.includeCorrect ? "是" : "否"}；納入答錯舊項目：${config.includeWrong ? "是" : "否"}。` : ""}答錯後間隔 ${config.retryGap} 個其他已答項目再重試，每個項目每輪最多自動重試一次，避免無限循環；不足時保留在答錯清單。</p>
-        <div class="actions"><button type="submit" ${purpose === "wrong" ? (!n.wrong ? "disabled" : "") : (!remaining(kind) ? "disabled" : "")}>${old && !old.completed ? "結束舊進度並開始這一輪" : "開始這一輪"}</button><a href="#settings">調整目標與複習比例</a></div>
+        <div class="actions"><button type="submit" ${!available ? "disabled" : ""}>${old && !old.completed ? "結束舊進度並開始這一輪" : "開始這一輪"}</button><a href="#settings">調整目標與複習比例</a>${purpose === "marked" ? '<a href="#reviews">返回我的複習列表</a>' : ""}</div>
       </form>
       ${purpose === "wrong" && !n.wrong ? '<p class="hint">目前沒有答錯項目。</p>' : ""}
+      ${purpose === "marked" && !markedCount ? '<p class="hint">目前沒有符合設定的不熟項目。可在作答處勾選，或檢查虛詞排除設定。</p>' : ""}
       ${purpose === "daily" && !remaining(kind) ? '<p class="hint">今日目標已完成！仍可另開答錯複習；提高設定中的目標，才能增加今日一般練習。</p>' : ""}
     </section>
     ${grammarHelp(kind)}
@@ -144,7 +158,7 @@ function bankSetup(kind, purpose) {
     if (activeSession(kind) && !confirm("要結束此題庫尚未完成的練習，重新安排嗎？已作答紀錄會保留，未作答項目不會算完成。")) return;
     action(async () => {
       await commit(next => {
-        next.sessions[kind] = buildSession({ kind, cards: next.banks[kind], stats: next.stats[kind], settings: next.settings[kind], purpose, mode, order, levelFilter: kind === "levels" ? selectedLevel : "all" });
+        next.sessions[kind] = buildSession({ kind, cards: next.banks[kind], stats: next.stats[kind], settings: next.settings[kind], purpose, mode, order, levelFilter: level, reviewIds: next.reviewLists[kind] });
         return next;
       });
       location.hash = `study-${kind}`;
@@ -163,10 +177,10 @@ function grammarView() {
   const work = state.grammarWork;
   const filtered = questions.filter(question =>
     (work.category === "all" || question.categories.some(category => category.id === work.category)) &&
-    (work.filter === "all" || (work.filter === "wrong" ? work.answers[question.id]?.stat?.status === "wrong" : !work.answers[question.id]?.submitted)));
+    (work.filter === "all" || (work.filter === "marked" ? state.reviewLists.grammar.includes(question.id) : work.filter === "wrong" ? work.answers[question.id]?.stat?.status === "wrong" : !work.answers[question.id]?.submitted)));
   const remembered = questions.find(question => question.id === work.currentQuestionId);
   const question = filtered.find(item => item.id === work.currentQuestionId) ||
-    (remembered && work.answers[remembered.id]?.submitted ? remembered : filtered[0]);
+    (remembered && work.answers[remembered.id]?.submitted && (work.filter !== "marked" || state.reviewLists.grammar.includes(remembered.id)) ? remembered : filtered[0]);
   const response = question && work.answers[question.id];
   const canRetry = work.filter !== "wrong" || response?.stat?.status === "wrong";
   const key = question && matchGrammarAnswer(question, state.grammarKeys);
@@ -175,7 +189,7 @@ function grammarView() {
   const nextQuestion = index >= 0 ? filtered[index + 1] : filtered.find(item => item.id !== question?.id);
   app.innerHTML = `<div class="study"><a href="#home">← 返回首頁</a><h1 class="section-heading">文法原題練習</h1>
     <section class="card"><div class="form-grid"><div><label for="grammar-category">文法分類</label><select id="grammar-category"><option value="all">全部分類</option>${state.banks.grammar.map(card => `<option value="${escape(card.id)}" ${work.category === card.id ? "selected" : ""}>${escape(card.chinese)} · ${escape(card.english)}</option>`).join("")}</select></div>
-    <div><label for="grammar-filter">題目範圍</label><select id="grammar-filter"><option value="all" ${work.filter === "all" ? "selected" : ""}>全部原題</option><option value="wrong" ${work.filter === "wrong" ? "selected" : ""}>只複習答錯原題</option><option value="unanswered" ${work.filter === "unanswered" ? "selected" : ""}>尚未保存作答</option></select></div></div>
+    <div><label for="grammar-filter">題目範圍</label><select id="grammar-filter"><option value="all" ${work.filter === "all" ? "selected" : ""}>全部原題</option><option value="wrong" ${work.filter === "wrong" ? "selected" : ""}>只複習答錯原題</option><option value="unanswered" ${work.filter === "unanswered" ? "selected" : ""}>尚未保存作答</option><option value="marked" ${work.filter === "marked" ? "selected" : ""}>我的複習列表</option></select></div></div>
     <p class="muted">符合條件 ${filtered.length} 道 · 全部 ${questions.length} 道 · ${questions.filter(item => matchGrammarAnswer(item, state.grammarKeys)).length} 道有對應答案</p></section>
     ${!question ? '<section class="card empty">目前沒有符合條件的原題。可切換分類或匯入文法題庫。</section>' : `
     <section class="card"><span class="badge">${key ? "已對應答案，可判分" : "答案待核實，不判分"}</span><p class="muted">民國 ${escape(question.year ?? "未標註")} 年 · 第 ${escape(question.number || "未標註")} 題</p>
@@ -193,6 +207,8 @@ function grammarView() {
           `<fieldset><legend>請選擇原題選項</legend>${question.choices.map((choice, choiceIndex) => `<label class="check grammar-option"><input type="radio" name="grammar-answer" value="${escape(choice)}" ${choiceIndex === 0 ? "required" : ""}>${escape(choice)}</label>`).join("")}</fieldset>` :
           '<div><label for="grammar-text">填入你的答案</label><textarea id="grammar-text" name="grammar-answer" rows="3" required></textarea></div>'}
           <button type="submit">${key ? "確認答案" : "保存作答（尚無正式答案）"}</button></form>`}
+      ${reviewMark("grammar", question.id)}
+      <p class="muted">標記不會判分；答對後仍保留，可在「我的複習列表」再次練習。</p>
       <details ${response?.submitted ? "open" : ""}><summary>原文與來源核對</summary><p class="source" lang="en">${escape(question.original)}</p><p class="muted">來源：${escape(question.source)} · PDF 第 ${escape(question.page ?? "?")} 頁</p>
       ${response?.submitted && question.rationale ? `<p class="source">原有 AI 文法說明（非正式答案解析）：${escape(question.rationale)}</p>` : ""}</details>
     </section>`}
@@ -238,7 +254,7 @@ function grammarView() {
 }
 
 function detailsHTML(card, kind) {
-  if (kind === "levels") return "";
+  if (simpleBank(kind)) return "";
   const details = card.details || {};
   const fieldNames = {
     part_of_speech: "詞性", phrase_type: "片語類型", example_en: "例句／原始題目",
@@ -290,8 +306,8 @@ function study(kind) {
   const feedback = session.feedback;
   const total = session.newCount + session.reviewCount;
   const unique = session.answeredIds.length;
-  app.innerHTML = `<div class="study"><div class="actions"><a href="#home">← 儲存並返回首頁</a><span class="badge">${names[kind]} · ${session.purpose === "wrong" ? "額外答錯複習" : "每日練習"}</span></div><h1 class="section-heading">${!item || session.completed ? "這一輪已結束" : "專注眼前這一題"}</h1>
-    <p class="muted">${kind === "levels" ? `第 ${session.levelFilter || selectedLevel} 級 · ` : ""}不同已答項目 ${unique} / ${total} · 作答次數 ${session.attempts}<br>本輪安排：新項目 ${session.newCount} · 舊項目 ${session.reviewCount}（不含重試）</p>
+  app.innerHTML = `<div class="study"><div class="actions"><a href="#home">← 儲存並返回首頁</a><span class="badge">${names[kind]} · ${purposeLabel(session.purpose)}</span></div><h1 class="section-heading">${!item || session.completed ? "這一輪已結束" : "專注眼前這一題"}</h1>
+    <p class="muted">${kind === "levels" && session.levelFilter !== "all" ? `第 ${session.levelFilter || selectedLevel} 級 · ` : ""}不同已答項目 ${unique} / ${total} · 作答次數 ${session.attempts}<br>本輪安排：新項目 ${session.newCount} · 舊項目 ${session.reviewCount}（不含重試）</p>
     <progress aria-label="本輪不同項目進度" value="${Math.min(unique, total)}" max="${Math.max(total, 1)}"></progress>
     ${session.day !== today() ? '<p class="warning">本輪開始於較早日期；現在的新作答計入今天，不會重複補發一整輪題目。</p>' : ""}
     ${!item || session.completed ? `<section class="card empty"><h2>${total ? "練習已保存" : "目前沒有符合條件的項目"}</h2><p>${total ? `本輪練習 ${unique} 個不同項目，共 ${session.attempts} 次作答。` : "不會使用已關閉的答對／答錯項目來補足數量。請調整設定，或匯入更多資料。"}</p><p class="muted">重試若沒有足夠的其他題目可間隔，會留在答錯清單供下次複習，不立即連續重複。</p><div class="actions"><a class="button" href="#home">回首頁</a><a class="button secondary" href="#wrong-${kind}">查看答錯複習</a></div></section>` : `
@@ -301,6 +317,8 @@ function study(kind) {
         <h2 class="prompt" ${session.mode === "choice" ? 'lang="en"' : ""}>${escape(session.mode === "typing" ? labelFor(card) : card.english)}</h2>
         ${session.mode === "choice" && !feedback ? speechButton(card) : ""}
         ${feedback ? feedbackHTML(kind, card, feedback) : questionHTML(session, item, kind)}
+        ${reviewMark(kind, card.id)}
+        <p class="muted">標記不代表答錯，也不會送出答案；答對後仍保留，取消勾選才移出。</p>
       </section>`}
     ${grammarHelp(kind)}
     <p class="muted">進度在每次作答後保存。未送出的答案不計分；可隨時返回首頁暫停。</p></div>`;
@@ -341,9 +359,9 @@ function questionHTML(session, item, kind) {
 
 function feedbackHTML(kind, card, feedback) {
   const stat = statFor(kind, card.id);
-  return `<div class="feedback ${feedback.correct ? "" : "wrong"}" role="status"><strong>${feedback.correct ? "答對了" : "這次答錯了，再慢慢記住"}</strong><p>正確詞條：<strong lang="en">${escape(card.english)}</strong><br>中文意思：${escape(labelFor(card))}${feedback.correct ? "" : `<br>你的答案：${escape(feedback.answer)}`}</p>${kind === "levels" ? "" : `<p>${stat?.status === "wrong" ? `仍在答錯清單 · 連續答對 ${stat.streak} / 3` : "已在答對清單"} · 累計答對 ${stat?.correct ?? 0}／答錯 ${stat?.wrong ?? 0}</p>`}</div>
+  return `<div class="feedback ${feedback.correct ? "" : "wrong"}" role="status"><strong>${feedback.correct ? "答對了" : "這次答錯了，再慢慢記住"}</strong><p>正確詞條：<strong lang="en">${escape(card.english)}</strong><br>中文意思：${escape(labelFor(card))}${feedback.correct ? "" : `<br>你的答案：${escape(feedback.answer)}`}</p>${simpleBank(kind) ? "" : `<p>${stat?.status === "wrong" ? `仍在答錯清單 · 連續答對 ${stat.streak} / 3` : "已在答對清單"} · 累計答對 ${stat?.correct ?? 0}／答錯 ${stat?.wrong ?? 0}</p>`}</div>
     <div class="actions">${speechButton(card)}<button id="next-card" type="button">下一題／完成本輪 ↵</button></div>
-    ${kind === "levels" ? "" : `<details open><summary>例句與來源說明</summary>${detailsHTML(card, kind)}</details>`}`;
+    ${simpleBank(kind) ? "" : `<details open><summary>例句與來源說明</summary>${detailsHTML(card, kind)}</details>`}`;
 }
 
 function submitAnswer(kind, token, answer) {
@@ -360,10 +378,11 @@ function submitAnswer(kind, token, answer) {
 }
 
 function settings() {
-  app.innerHTML = `<h1>設定與匯入</h1><p class="muted">四個獨立題庫，匯入一次就會自動載入。所有檔案只在此裝置處理。</p>
+  app.innerHTML = `<h1>設定與匯入</h1><p class="muted">五個獨立題庫，匯入一次就會自動載入。所有檔案只在此裝置處理。</p>
     <section class="warning"><strong>請定期備份：</strong>清除網站資料、無痕模式、換裝置或瀏覽器回收儲存空間，都可能讓本機紀錄消失。安裝到主畫面並不等於雲端備份。</section>
     <div class="grid">${kinds.map(kind => `<section class="card"><h2>${names[kind]}題庫</h2><p>${state.banks[kind].length ? `已匯入 ${state.banks[kind].length.toLocaleString()} 筆 · 自動載入` : "尚未匯入"}</p>
       <label for="import-${kind}">選取${names[kind]} CSV</label><input id="import-${kind}" type="file" accept=".csv,text/csv"><p id="import-status-${kind}" class="muted" role="status">請選取 UTF-8 CSV；會先完整驗證再替換。</p>
+      ${kind === "extra" ? '<p class="hint">請在此載入 level-words-not-in-vocabulary.csv（2,301 筆差集）。獨立於原單字與完整分級題庫，不覆蓋它們；只需匯入一次。</p>' : ""}
       <p class="muted">重匯同一 ID 保留歷史；移除的項目及其紀錄會從此題庫移除。匯入會結束此題庫未完成的練習。</p>${kind === "levels" ? '<p class="muted">分級依本次上傳的詞表，可能與另一版本的大考中心詞表不同，不混用級別。中文釋義另據教材與詞典整理，並非大考中心官方中文，也未經逐條獨立人工核驗。</p>' : ""}</section>`).join("")}</div>
     <section class="card"><h2>文法正式答案</h2><p>先匯入文法題庫，再選擇由正式答案整理的對照 CSV。程式會核對來源、年度、題號及原始選項，不把 AI 理由當答案。</p><label for="import-grammar-keys">選取正式答案對照 CSV</label><input id="import-grammar-keys" type="file" accept=".csv,text/csv"><p id="grammar-keys-status" role="status">目前 ${state.grammarKeys.length} 筆答案對照。替換答案不會清除已保存的作答，既有評分不會被偷偷改寫。</p></section>
     <section class="card"><h2>每日目標與複習方式</h2><form id="settings-form"><div class="grid">${studyKinds.map(kind => {
@@ -374,10 +393,10 @@ function settings() {
         <div><label for="${kind}-gap">答錯重試間隔（其他題數）</label><input id="${kind}-gap" name="${kind}-gap" type="number" min="1" step="1" value="${config.retryGap}" required></div>
         <label class="check"><input id="${kind}-correct" type="checkbox" ${config.includeCorrect ? "checked" : ""}>納入答對舊項目</label>
         <label class="check"><input id="${kind}-wrong" type="checkbox" ${config.includeWrong ? "checked" : ""}>納入答錯舊項目</label>
-        ${["words", "levels"].includes(kind) ? `<label class="check"><input id="${kind}-exclude-function" type="checkbox" ${config.excludeFunctionWords ? "checked" : ""}>排除虛詞，不列入測試</label>` : ""}
+        ${vocabularyKinds.includes(kind) ? `<label class="check"><input id="${kind}-exclude-function" type="checkbox" ${config.excludeFunctionWords ? "checked" : ""}>排除虛詞，不列入測試</label>` : ""}
       </div></fieldset>`;
     }).join("")}</div><p class="muted">設定影響下一輪安排，已開始的練習保留原順序。預設兩種舊項目都納入；未勾選者絕不作為一般複習目標（選項干擾答案仍可使用整個題庫）。舊項目優先數不足時，以新項目補足。</p><button type="submit">儲存設定</button></form></section>
-    <section class="card"><h2>完整備份與還原</h2><p>JSON 包含題庫、設定、所有作答紀錄及尚未完成的練習。可能包含原始題目與私人學習資料，請自行妥善保管，不要上傳公開儲存庫。</p><div class="actions"><button id="backup">匯出完整 JSON 備份</button><button id="persist-storage" class="secondary">要求瀏覽器保留資料</button></div><p id="storage-status" class="muted" role="status"></p><div class="section-heading"><label for="restore">選取完整備份以還原（取代全部本機資料）</label><input id="restore" type="file" accept=".json,application/json"></div></section>
+    <section class="card"><h2>完整備份與還原</h2><p>JSON 包含五個題庫、設定、我的複習列表、所有作答紀錄及尚未完成的練習。可能包含原始題目與私人學習資料，請自行妥善保管，不要上傳公開儲存庫。</p><div class="actions"><button id="backup">匯出完整 JSON 備份</button><button id="persist-storage" class="secondary">要求瀏覽器保留資料</button></div><p id="storage-status" class="muted" role="status"></p><div class="section-heading"><label for="restore">選取完整備份以還原（取代全部本機資料）</label><input id="restore" type="file" accept=".json,application/json"></div></section>
     <section class="card"><h2>使用說明</h2><p>單字與片語支援「看中文輸入英文」與「看英文選中文」。輸入比對忽略大小寫、前後及重複空白、智慧型撇號，但不接受片段或任意變化詞形。答錯後要連續答對 3 次才能回到答對清單。</p><p>「虛詞」以冠詞、代名詞、介系詞、連接詞、助動詞等功能用法為主；兼有實詞用法者保守保留。排除只影響下一輪出題，不刪掉題庫與歷史。</p><p>發音使用裝置上的離線英文語音。若系統沒有英文語音，請先到裝置語音設定下載；本程式不把詞條送到線上發音服務。輸入英文模式在評分後提供發音，避免先洩漏答案。</p><p>文法改為原始填空與選項。只有成功對應正式答案的題目才計分；分類不再當作測驗答案。上一版文法概念配對的歷史保留於備份，但不混入原題成績。</p><p>大考中心是「大學入學考試中心」（CEEC）。級別是英文詞彙分級，不代表中文翻譯也由大考中心提供。本批學測語料缺民國 109、114 年，英聽只有部分官方文字稿，因此頻率並非所有歷年試題的完整統計。</p><p>手機：Android Chrome 使用「安裝應用程式／加到主畫面」；iPhone Safari 使用分享 → 加入主畫面。首次連線後，確認下方顯示離線資源就緒再離線。</p></section>`;
   kinds.forEach(kind => byId(`import-${kind}`).addEventListener("change", event => {
     const file = event.target.files[0];
@@ -528,13 +547,74 @@ function lists() {
   renderList();
 }
 
+function reviews() {
+  app.innerHTML = `<h1>我的複習列表</h1><p class="muted">四選一與輸入題都能勾選「不太熟」。不會自動算錯，答對也不自動移除；取消勾選即可移出，作答紀錄仍保留。</p>
+    <section class="card"><div class="filters"><div><label for="review-kind">複習題庫</label><select id="review-kind">${kinds.map(kind => `<option value="${kind}" ${reviewKind === kind ? "selected" : ""}>${names[kind]}（${state.reviewLists[kind].length}）</option>`).join("")}</select></div>
+      <div><label for="review-search">搜尋英文／中文／原題</label><input id="review-search" type="search" value="${escape(reviewQuery)}"></div></div>
+      <p>每頁最多顯示 25 筆。開始練習會選此題庫的已標記項目，不限搜尋結果；單字類仍遵守虛詞排除設定，進入後可選作答方式及順序。</p><p class="muted">已開始的單字／片語回合保留原順序；中途取消標記會移出列表，但不改寫已安排的題目與重試。</p></section><div id="review-results"></div>`;
+  byId("review-kind").addEventListener("change", event => {
+    reviewKind = event.target.value;
+    reviewPage = 0;
+    renderReviewList();
+  });
+  let timer;
+  byId("review-search").addEventListener("input", event => {
+    reviewQuery = event.target.value;
+    clearTimeout(timer);
+    timer = setTimeout(() => { reviewPage = 0; if (byId("review-results")) renderReviewList(); }, 120);
+  });
+  renderReviewList();
+}
+
+function renderReviewList() {
+  const marked = new Set(state.reviewLists[reviewKind]);
+  const needle = reviewQuery.trim().toLocaleLowerCase();
+  const cards = reviewKind === "grammar"
+    ? buildGrammarQuestions(state.banks.grammar).map(question => ({
+      id: question.id, english: question.original,
+      chinese: `民國 ${question.year ?? "未標註"} 年 · 第 ${question.number || "未標註"} 題 · ${question.categories.map(category => category.chinese).join("／")}`
+    })) : frequencySort(state.banks[reviewKind]);
+  const rows = cards.filter(card => marked.has(card.id) &&
+    (!needle || `${card.english} ${card.chinese}`.toLocaleLowerCase().includes(needle)));
+  const pages = Math.max(1, Math.ceil(rows.length / 25));
+  reviewPage = Math.min(reviewPage, pages - 1);
+  const visible = rows.slice(reviewPage * 25, (reviewPage + 1) * 25);
+  byId("review-results").innerHTML = `<section class="card"><div class="actions">${reviewKind === "grammar"
+    ? `<button id="review-grammar-start" ${!marked.size ? "disabled" : ""}>開始文法複習</button>`
+    : `<a class="button" href="#marked-${reviewKind}">練習此題庫已標記項目</a>`}</div>
+    <p role="status">此題庫已標記 ${marked.size} 筆 · 搜尋符合 ${rows.length} 筆 · 第 ${reviewPage + 1} / ${pages} 頁</p>
+    ${visible.length ? visible.map(card => `<article class="hint">
+      <p lang="en" class="source"><strong>${escape(reviewKind === "grammar" ? card.english.slice(0, 400) + (card.english.length > 400 ? "…" : "") : card.english)}</strong></p>
+      <p>${escape(reviewKind === "grammar" ? card.chinese : labelFor(card))}</p>
+      ${reviewKind === "grammar" ? `<button class="secondary" data-review-question="${escape(card.id)}">開啟這道原題</button>` : speechButton(card)}
+      ${reviewMark(reviewKind, card.id)}</article>`).join("") : '<p class="empty">沒有符合的已標記項目。請先在作答處勾選「不太熟，加入複習列表」，或清除搜尋條件。</p>'}
+    <div class="actions"><button id="review-previous" class="secondary" ${!reviewPage ? "disabled" : ""}>上一頁</button><button id="review-next" class="secondary" ${reviewPage >= pages - 1 ? "disabled" : ""}>下一頁</button></div></section>`;
+  byId("review-previous").addEventListener("click", () => { reviewPage--; renderReviewList(); });
+  byId("review-next").addEventListener("click", () => { reviewPage++; renderReviewList(); });
+  byId("review-grammar-start")?.addEventListener("click", () => openMarkedGrammar());
+}
+
+function openMarkedGrammar(id = null) {
+  action(async () => {
+    await commit(next => {
+      if (id !== null && !next.reviewLists.grammar.includes(id)) throw new Error("此原題已不在複習列表，請重新選取。");
+      next.grammarWork.filter = "marked";
+      next.grammarWork.category = "all";
+      next.grammarWork.currentQuestionId = id;
+      return next;
+    });
+    location.hash = "grammar";
+    render();
+  });
+}
+
 function renderList() {
   const { kind, status, level, sort, query } = listFilters;
   const needle = query.toLocaleLowerCase().trim();
   let rows = frequencySort(state.banks[kind]).filter(card => {
     const stat = statFor(kind, card.id);
     return (status === "all" || (stat?.status || "unseen") === status)
-      && (!listFilters.eligible || !["words", "levels"].includes(kind) || !state.settings[kind].excludeFunctionWords || !isFunctionWord(card))
+      && (!listFilters.eligible || !vocabularyKinds.includes(kind) || !state.settings[kind].excludeFunctionWords || !isFunctionWord(card))
       && (level === "all" || (level === "none" ? card.level === null : matchesLevel(card, level)))
       && (!needle || `${card.english} ${card.chinese}`.toLocaleLowerCase().includes(needle));
   });
@@ -543,10 +623,10 @@ function renderList() {
   listPage = Math.min(listPage, pages - 1);
   const visible = rows.slice(listPage * 25, (listPage + 1) * 25);
   byId("list-results").innerHTML = `<section class="card"><p role="status">共 ${rows.length.toLocaleString()} 筆 · 第 ${listPage + 1} / ${pages} 頁</p>
-    ${!visible.length ? '<p class="empty">沒有符合條件的資料。</p>' : `<div class="table-wrap"><table><thead><tr><th scope="col">詞條</th>${kind === "levels" ? "" : '<th scope="col">狀態與紀錄</th><th scope="col">頻率</th>'}</tr></thead><tbody>${visible.map(card => {
+    ${!visible.length ? '<p class="empty">沒有符合條件的資料。</p>' : `<div class="table-wrap"><table><thead><tr><th scope="col">詞條</th>${simpleBank(kind) ? "" : '<th scope="col">狀態與紀錄</th><th scope="col">頻率</th>'}</tr></thead><tbody>${visible.map(card => {
       const stat = statFor(kind, card.id);
       const statusText = stat?.status === "correct" ? "答對" : stat?.status === "wrong" ? `答錯 · 恢復 ${stat.streak}/3` : "未練習";
-      return `<tr><td><strong lang="en">${escape(card.english)}</strong><br>${escape(labelFor(card))}<br>${speechButton(card)}${kind === "levels" ? "" : `<small class="muted">大考中心詞彙級別 ${escape(levelLabel(card))}${isFunctionWord(card) ? " · 虛詞" : ""}</small><details><summary>來源／例句</summary>${detailsHTML(card, kind)}</details>`}</td>${kind === "levels" ? "" : `<td><span class="badge ${stat?.status || ""}">${statusText}</span><small>對 ${stat?.correct || 0}／錯 ${stat?.wrong || 0}</small>${stat?.lastPracticed ? `<small>${escape(new Date(stat.lastPracticed).toLocaleString("zh-TW"))}</small>` : ""}</td><td>${card.frequency}</td>`}</tr>`;
+      return `<tr><td><strong lang="en">${escape(card.english)}</strong><br>${escape(labelFor(card))}<br>${speechButton(card)}${reviewMark(kind, card.id)}${simpleBank(kind) ? "" : `<small class="muted">大考中心詞彙級別 ${escape(levelLabel(card))}${isFunctionWord(card) ? " · 虛詞" : ""}</small><details><summary>來源／例句</summary>${detailsHTML(card, kind)}</details>`}</td>${simpleBank(kind) ? "" : `<td><span class="badge ${stat?.status || ""}">${statusText}</span><small>對 ${stat?.correct || 0}／錯 ${stat?.wrong || 0}</small>${stat?.lastPracticed ? `<small>${escape(new Date(stat.lastPracticed).toLocaleString("zh-TW"))}</small>` : ""}</td><td>${card.frequency}</td>`}</tr>`;
     }).join("")}</tbody></table></div>`}
     <div class="actions"><button id="previous-page" class="secondary" ${listPage === 0 ? "disabled" : ""}>上一頁</button><button id="next-page" class="secondary" ${listPage >= pages - 1 ? "disabled" : ""}>下一頁</button></div></section>`;
   byId("previous-page").addEventListener("click", () => { listPage--; renderList(); });
@@ -562,12 +642,13 @@ function render() {
   });
   if (route === "settings") settings();
   else if (route === "lists") lists();
+  else if (route === "reviews") reviews();
   else if (route === "grammar") grammarView();
   else {
     const [page, kind] = route.split("-");
-    if (kinds.includes(kind) && ["bank", "wrong", "study"].includes(page)) {
+    if (kinds.includes(kind) && ["bank", "wrong", "marked", "study"].includes(page)) {
       if (page === "study") study(kind);
-      else bankSetup(kind, page === "wrong" ? "wrong" : "daily");
+      else bankSetup(kind, page === "bank" ? "daily" : page);
     } else home();
   }
 }
@@ -575,6 +656,30 @@ function render() {
 app.addEventListener("click", event => {
   const button = event.target.closest("[data-speak]");
   if (button) speakEnglish(button.dataset.speak, announce);
+  const question = event.target.closest("[data-review-question]");
+  if (question) openMarkedGrammar(question.dataset.reviewQuestion);
+});
+app.addEventListener("change", async event => {
+  const checkbox = event.target;
+  if (!checkbox.matches("[data-review-kind]")) return;
+  const kind = checkbox.dataset.reviewKind;
+  const id = checkbox.dataset.reviewId;
+  const marked = checkbox.checked;
+  if (busy) {
+    checkbox.checked = state.reviewLists[kind].includes(id);
+    announce("正在處理上一個操作，請完成後再勾選。");
+    return;
+  }
+  checkbox.disabled = true;
+  await action(async () => {
+    await commit(next => setReviewMark(next, kind, id, marked));
+    if (location.hash === "#reviews") reviews();
+    announce(marked ? "已加入我的複習列表；未變更作答成績。" : "已移出我的複習列表；作答紀錄保留。");
+  });
+  if (checkbox.isConnected) {
+    checkbox.checked = state.reviewLists[kind].includes(id);
+    checkbox.disabled = false;
+  }
 });
 window.addEventListener("hashchange", () => { stopSpeaking(); render(); window.scrollTo(0, 0); });
 channel?.addEventListener("message", async () => {
